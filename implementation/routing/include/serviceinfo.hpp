@@ -1,0 +1,78 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include <atomic>
+#include <memory>
+#include <set>
+#include <string>
+#include <chrono>
+#include <mutex>
+
+#include <vsomeip/export.hpp>
+#include <vsomeip/primitive_types.hpp>
+
+namespace vsomeip_v3 {
+
+class boardnet_endpoint;
+
+class serviceinfo {
+public:
+    VSOMEIP_EXPORT serviceinfo(service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor, ttl_t _ttl,
+                               bool _is_local);
+    VSOMEIP_EXPORT serviceinfo(const serviceinfo& _other);
+    VSOMEIP_EXPORT ~serviceinfo();
+
+    VSOMEIP_EXPORT service_t get_service() const;
+    VSOMEIP_EXPORT instance_t get_instance() const;
+
+    VSOMEIP_EXPORT major_version_t get_major() const;
+    VSOMEIP_EXPORT minor_version_t get_minor() const;
+
+    VSOMEIP_EXPORT ttl_t get_ttl() const;
+    VSOMEIP_EXPORT void set_ttl(ttl_t _ttl);
+
+    VSOMEIP_EXPORT std::chrono::milliseconds get_precise_ttl() const;
+    VSOMEIP_EXPORT void set_precise_ttl(std::chrono::milliseconds _precise_ttl);
+
+    VSOMEIP_EXPORT std::shared_ptr<boardnet_endpoint> get_endpoint(bool _reliable) const;
+    VSOMEIP_EXPORT void set_endpoint(const std::shared_ptr<boardnet_endpoint>& _endpoint, bool _reliable);
+
+    VSOMEIP_EXPORT void add_client(client_t _client);
+    VSOMEIP_EXPORT void remove_client(client_t _client);
+    VSOMEIP_EXPORT uint32_t get_requesters_size();
+
+    VSOMEIP_EXPORT bool is_local() const;
+
+    VSOMEIP_EXPORT bool is_in_preparation() const;
+    VSOMEIP_EXPORT void set_is_in_preparation(bool _in_preparation);
+
+    VSOMEIP_EXPORT bool is_in_mainphase() const;
+    VSOMEIP_EXPORT void set_is_in_mainphase(bool _in_mainphase);
+
+private:
+    mutable std::mutex mutex_;
+
+    const service_t service_;
+    const instance_t instance_;
+
+    const major_version_t major_;
+    const minor_version_t minor_;
+
+    const bool is_local_;
+
+    std::chrono::milliseconds ttl_;
+
+    std::shared_ptr<boardnet_endpoint> reliable_;
+    std::shared_ptr<boardnet_endpoint> unreliable_;
+
+    std::set<client_t> requesters_;
+
+    std::atomic_bool is_in_preparation_;
+    std::atomic_bool is_in_mainphase_;
+};
+
+} // namespace vsomeip_v3

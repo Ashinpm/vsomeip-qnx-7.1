@@ -1,0 +1,82 @@
+{
+    "unicast" : "@TEST_IP_MASTER@",
+    "netmask" : "255.255.255.0",
+    "logging" :
+    {
+        "level" : "trace",
+        "console" : "true"
+    },
+    "tracing" :
+    {
+        "enable" : "true"
+    },
+    "services" :
+    [
+       {
+          "service" : "0x1234",
+          "instance" : "0x5678",
+          "unicast" : "@TEST_IP_MASTER@",
+          "unreliable" : "30509"
+       },
+       {
+          "service" : "0x111",
+          "instance" : "0x5678",
+          "unicast" : "@TEST_IP_MASTER@",
+          "unreliable" : "30509"
+       },
+       {
+          "service" : "0x1234",
+          "instance" : "0x02",
+          "unicast" : "@TEST_IP_MASTER@",
+          "unreliable" : "30509"
+       }
+    ],
+    "security" :
+    {
+        "check_credentials" : "true",
+        "allow_remote_clients" : "true",
+        "policies" :
+        [
+            {
+                "credentials" : {"uid" : "0", "gid" : "0"},
+                "allow" :
+                {
+                    "offers":
+                    [
+                        {
+                            "service"  : "0x1234",
+                            "instances" : ["0x5678", "0x02"]
+                        }
+                    ]
+                }
+            },
+            {
+                "credentials" : {"uid" : "0", "gid" : "0"},
+                "allow" :
+                {
+                    "requests":
+                    [
+                        {
+                            "service"  : "0x1234",
+                            "instances" :
+                            [
+                                {
+                                    "ids" : ["0x5678"],
+                                    "methods" : [ {"first" : "0x8421", "last" : "0x8422" }, "0x8001", "0x7777" ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+    "routing" : "routingmanagerd",
+    "service-discovery" :
+    {
+        "enable" : "true",
+        "multicast" : "224.0.0.1",
+        "port" : "30490",
+        "protocol" : "udp"
+    }
+}

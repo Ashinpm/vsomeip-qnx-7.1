@@ -1,0 +1,31 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+FAIL=0
+
+export VSOMEIP_CONFIGURATION=offer_test_external_slave.json
+export VSOMEIP_APPLICATION_NAME="remote-host"
+# Start remote host
+routingmanagerd &
+REMOTE_HOST_PID=$!
+
+# Start remote service and wait for it to end
+# The remote service will end when client subscribes
+# to the service (offered by either local or remote service)
+export VSOMEIP_APPLICATION_NAME="remote-service"
+./offer_test_external_remote_service || ((FAIL+=1))
+
+# Kill the remote host
+kill $REMOTE_HOST_PID
+wait $REMOTE_HOST_PID || FAIL=$(($FAIL+1))
+
+# Exit second container
+exit $FAIL

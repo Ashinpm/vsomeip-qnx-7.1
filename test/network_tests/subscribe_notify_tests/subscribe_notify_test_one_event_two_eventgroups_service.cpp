@@ -1,0 +1,241 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#ifndef VSOMEIP_ENABLE_SIGNAL_HANDLING
+#include <csignal>
+#if defined(__linux__) || defined(__QNX__)
+#include <pthread.h>
+#endif
+#endif
+#include <chrono>
+#include <condition_variable>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <thread>
+#include <atomic>
+
+#include <gtest/gtest.h>
+#include <vsomeip/internal/logger.hpp>
+
+#include <vsomeip/vsomeip.hpp>
+
+#include "subscribe_notify_test_globals.hpp"
+#include "../someip_test_globals.hpp"
+#include <common/vsomeip_app_utilities.hpp>
+#include "common/test_main.hpp"
+
+class subscribe_notify_test_one_event_two_eventgroups_service {
+public:
+    subscribe_notify_test_one_event_two_eventgroups_service(subscribe_notify_test::service_info _info, bool _use_tcp) :
+
+        app_(vsomeip::runtime::get()->create_application()), wait_for_shutdown_(true), info_(_info),
+        notify_thread_(std::bind(&subscribe_notify_test_one_event_two_eventgroups_service::wait_for_shutdown, this)), use_tcp_(_use_tcp) { }
+
+    ~subscribe_notify_test_one_event_two_eventgroups_service() {
+        if (notify_thread_.joinable()) {
+            notify_thread_.join();
+        }
+    }
+
+    bool init() {
+        if (!app_->init()) {
+            ADD_FAILURE() << "Couldn't initialize application";
+            return false;
+        }
+        app_->register_state_handler(
+                std::bind(&subscribe_notify_test_one_event_two_eventgroups_service::on_state, this, std::placeholders::_1));
+
+        app_->register_message_handler(
+                info_.service_id, info_.instance_id, subscribe_notify_test::set_method_id,
+                std::bind(&subscribe_notify_test_one_event_two_eventgroups_service::on_set, this, std::placeholders::_1));
+
+        app_->register_message_handler(
+                info_.service_id, info_.instance_id, info_.method_id,
+                std::bind(&subscribe_notify_test_one_event_two_eventgroups_service::on_message, this, std::placeholders::_1));
+
+        app_->register_message_handler(
+                info_.service_id, info_.instance_id, subscribe_notify_test::shutdown_method_id,
+                std::bind(&subscribe_notify_test_one_event_two_eventgroups_service::on_shutdown, this, std::placeholders::_1));
+
+        std::set<vsomeip::eventgroup_t> its_groups;
+        // the service offers three events in two eventgroups
+        // one of the events is in both eventgroups
+        its_groups.insert(info_.eventgroup_id);
+        app_->offer_event(info_.service_id, info_.instance_id, info_.event_id, its_groups, vsomeip::event_type_e::ET_FIELD,
+                          std::chrono::milliseconds::zero(), false, true, nullptr,
+                          (use_tcp_ ? vsomeip::reliability_type_e::RT_RELIABLE : vsomeip::reliability_type_e::RT_UNRELIABLE));
+        app_->offer_event(info_.service_id, info_.instance_id, static_cast<vsomeip::event_t>(info_.event_id + 2), its_groups,
+                          vsomeip::event_type_e::ET_FIELD, std::chrono::milliseconds::zero(), false, true, nullptr,
+                          (use_tcp_ ? vsomeip::reliability_type_e::RT_RELIABLE : vsomeip::reliability_type_e::RT_UNRELIABLE));
+        its_groups.erase(info_.eventgroup_id);
+        its_groups.insert(static_cast<vsomeip::eventgroup_t>(info_.eventgroup_id + 1));
+        app_->offer_event(info_.service_id, info_.instance_id, static_cast<vsomeip::event_t>(info_.event_id + 1), its_groups,
+                          vsomeip::event_type_e::ET_FIELD, std::chrono::milliseconds::zero(), false, true, nullptr,
+                          (use_tcp_ ? vsomeip::reliability_type_e::RT_RELIABLE : vsomeip::reliability_type_e::RT_UNRELIABLE));
+        app_->offer_event(info_.service_id, info_.instance_id, static_cast<vsomeip::event_t>(info_.event_id + 2), its_groups,
+                          vsomeip::event_type_e::ET_FIELD, std::chrono::milliseconds::zero(), false, true, nullptr,
+                          (use_tcp_ ? vsomeip::reliability_type_e::RT_RELIABLE : vsomeip::reliability_type_e::RT_UNRELIABLE));
+        payload_ = vsomeip::runtime::get()->create_payload();
+
+        return true;
+    }
+
+    void start() { app_->start(); }
+
+#ifndef VSOMEIP_ENABLE_SIGNAL_HANDLING
+    void stop() {
+        {
+            std::scoped_lock its_lock(shutdown_mutex_);
+            wait_for_shutdown_ = false;
+            shutdown_condition_.notify_one();
+        }
+
+        app_->clear_all_handler();
+        stop_offer();
+        if (notify_thread_.joinable()) {
+            notify_thread_.join();
+        }
+        app_->stop();
+    }
+#endif
+
+    void offer() { app_->offer_service(info_.service_id, info_.instance_id); }
+
+    void stop_offer() { app_->stop_offer_service(info_.service_id, info_.instance_id); }
+
+    void on_state(vsomeip::state_type_e _state) {
+        std::cout << "Application " << app_->get_name() << " is "
+                  << (_state == vsomeip::state_type_e::ST_REGISTERED ? "registered." : "deregistered.") << std::endl;
+
+        if (_state == vsomeip::state_type_e::ST_REGISTERED) {
+            offer();
+        }
+    }
+
+    void on_shutdown(const std::shared_ptr<vsomeip::message>& _message) {
+        std::shared_ptr<vsomeip::message> its_response = vsomeip::runtime::get()->create_response(_message);
+        its_response->set_payload(payload_);
+        app_->send(its_response);
+        {
+            std::scoped_lock its_lock(shutdown_mutex_);
+            wait_for_shutdown_ = false;
+            shutdown_condition_.notify_one();
+        }
+    }
+
+    void on_set(const std::shared_ptr<vsomeip::message>& _message) {
+        std::shared_ptr<vsomeip::message> its_response = vsomeip::runtime::get()->create_response(_message);
+        payload_ = _message->get_payload();
+        its_response->set_payload(payload_);
+        app_->send(its_response);
+        app_->notify(info_.service_id, info_.instance_id, info_.event_id, payload_);
+        app_->notify(info_.service_id, info_.instance_id, static_cast<vsomeip::event_t>(info_.event_id + 1), payload_);
+        app_->notify(info_.service_id, info_.instance_id, static_cast<vsomeip::event_t>(info_.event_id + 2), payload_);
+    }
+
+    void on_message(const std::shared_ptr<vsomeip::message>& _message) { app_->send(vsomeip::runtime::get()->create_response(_message)); }
+
+    void wait_for_shutdown() {
+        {
+            std::unique_lock its_lock(shutdown_mutex_);
+            shutdown_condition_.wait(its_lock, [this] { return !wait_for_shutdown_; });
+            wait_for_shutdown_ = true;
+        }
+
+        app_->clear_all_handler();
+
+        // magic sleep to give time for the last message to be sent and processed by the client before STOP_OFFER is sent, otherwise the
+        // client may drop the message and the test will fail
+        // TODO: FIXME! REMOVE THIS!
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        stop_offer();
+        app_->stop();
+    }
+
+private:
+    std::shared_ptr<vsomeip::application> app_;
+
+    std::mutex shutdown_mutex_;
+    bool wait_for_shutdown_;
+    std::condition_variable shutdown_condition_;
+
+    std::shared_ptr<vsomeip::payload> payload_;
+
+    subscribe_notify_test::service_info info_;
+
+    std::thread notify_thread_;
+    bool use_tcp_;
+};
+
+static bool use_tcp;
+
+TEST(someip_subscribe_notify_test_one_event_two_eventgroups, wait_for_attribute_set) {
+    subscribe_notify_test_one_event_two_eventgroups_service its_service(subscribe_notify_test::service_info_subscriber_based_notification,
+                                                                        use_tcp);
+#ifndef VSOMEIP_ENABLE_SIGNAL_HANDLING
+#if defined(__linux__) || defined(__QNX__)
+    sigset_t its_signals;
+    sigemptyset(&its_signals);
+    sigaddset(&its_signals, SIGINT);
+    sigaddset(&its_signals, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &its_signals, nullptr);
+#endif
+#endif
+    if (its_service.init()) {
+#ifndef VSOMEIP_ENABLE_SIGNAL_HANDLING
+#if defined(__linux__) || defined(__QNX__)
+        std::thread signal_watcher([&its_service]() {
+            sigset_t its_wait_set;
+            sigemptyset(&its_wait_set);
+            sigaddset(&its_wait_set, SIGINT);
+            sigaddset(&its_wait_set, SIGTERM);
+
+            int its_signal = 0;
+            while (sigwait(&its_wait_set, &its_signal) == 0) {
+                if (its_signal == SIGINT || its_signal == SIGTERM) {
+                    its_service.stop();
+                    return;
+                }
+            }
+        });
+#endif
+#endif
+        its_service.start();
+#ifndef VSOMEIP_ENABLE_SIGNAL_HANDLING
+#if defined(__linux__) || defined(__QNX__)
+        if (signal_watcher.joinable()) {
+            pthread_cancel(signal_watcher.native_handle());
+            signal_watcher.join();
+        }
+#endif
+#endif
+    }
+}
+
+#if defined(__linux__) || defined(__QNX__)
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "Please specify a offer type of the service, like: " << argv[0] << " UDP" << std::endl;
+        std::cerr << "Valid offer types include:" << std::endl;
+        std::cerr << "[UDP, TCP]" << std::endl;
+        return 1;
+    }
+
+    if (std::string("TCP") == std::string(argv[1])) {
+        use_tcp = true;
+    } else if (std::string("UDP") == std::string(argv[1])) {
+        use_tcp = false;
+    } else {
+        std::cerr << "Wrong subscription type passed, exiting" << std::endl;
+        std::cerr << "Valid subscription types include:" << std::endl;
+        std::cerr << "[UDP, TCP]" << std::endl;
+        return 1;
+    }
+
+    return test_main(argc, argv);
+}
+#endif

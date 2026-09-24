@@ -1,0 +1,59 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include <boost/asio/ip/address.hpp>
+
+#include <vsomeip/primitive_types.hpp>
+
+#include "internal.hpp"
+
+namespace vsomeip_v3 {
+namespace cfg {
+
+struct routing_host_t {
+    std::string name_;
+    boost::asio::ip::address unicast_;
+    port_t port_;
+
+    routing_host_t() : port_(VSOMEIP_ROUTING_HOST_PORT_DEFAULT) { }
+
+    routing_host_t& operator=(const routing_host_t& _other) {
+        name_ = _other.name_;
+        unicast_ = _other.unicast_;
+        port_ = _other.port_;
+
+        return *this;
+    }
+};
+
+struct routing_guests_t {
+    boost::asio::ip::address unicast_;
+    std::map<std::pair<uid_t, gid_t>, std::set<std::pair<port_t, port_t>>> ports_;
+
+    routing_guests_t& operator=(const routing_guests_t& _other) {
+        unicast_ = _other.unicast_;
+        ports_ = _other.ports_;
+
+        return *this;
+    }
+};
+
+struct routing_t {
+    routing_host_t host_;
+    routing_guests_t guests_;
+
+    routing_t() = default;
+
+    routing_t& operator=(const routing_t& _other) {
+        host_ = _other.host_;
+        guests_ = _other.guests_;
+        return *this;
+    }
+};
+
+} // namespace cfg
+} // namespace vsomeip_v3

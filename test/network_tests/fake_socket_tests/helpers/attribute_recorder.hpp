@@ -1,0 +1,142 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include <algorithm>
+#include <chrono>
+#include <optional>
+#include <condition_variable>
+#include <mutex>
+#include <numeric>
+#include <vector>
+#include <sstream>
+
+namespace vsomeip_v3::testing {
+
+/**
+ * Helper to block one thread while waiting for some events to happen on a background thread.
+ */
+template<typename Value>
+class attribute_recorder {
+public:
+    void record(Value _value) {
+        auto const lock = std::scoped_lock(mtx_);
+        record_.push_back(_value);
+        cv_.notify_all();
+    }
+
+    void clear() {
+        auto const lock = std::scoped_lock(mtx_);
+        record_.clear();
+        // not necessary to notify anybody, as we are only providing helpers for awaiting
+        // a value, not nothing
+    }
+
+    template<typename Predicate>
+    [[nodiscard]] bool wait_for(Predicate p, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        auto lock = std::unique_lock(mtx_);
+        if (p(record_)) {
+            return true;
+        }
+        return cv_.wait_for(lock, timeout, [&] { return p(record_); });
+    }
+
+    /**
+     * @brief Wait for *any* record to equal `p`
+     */
+    template<typename Predicate>
+    [[nodiscard]] bool wait_for_any(Predicate p, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        return wait_for(p, timeout);
+    }
+
+    /**
+     * @brief Wait for last record to equal `p`
+     */
+    template<typename Predicate>
+    [[nodiscard]] bool wait_for_last(Predicate p, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        // auto lock = std::unique_lock(mtx_);
+        return wait_for([&](auto const& record) { return !record.empty() && p == record.back(); }, timeout);
+    }
+
+    /**
+     * @brief Wait for *any* record to equal `_value`
+     */
+    [[nodiscard]] bool wait_for_any(Value const& _value, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        return wait_for(
+                [&_value](auto const& record) {
+                    return std::any_of(record.begin(), record.end(), [&](auto const& rec) { return rec == _value; });
+                },
+                timeout);
+    }
+
+    /**
+     * @brief Wait for last record to equal `_value`
+     */
+    [[nodiscard]] bool wait_for_last(Value const& _value, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        return wait_for([&_value](auto const& record) { return !record.empty() && record.back() == _value; }, timeout);
+    }
+
+    [[nodiscard]] std::optional<Value> last() {
+        auto const lock = std::scoped_lock(mtx_);
+        return record_.empty() ? std::nullopt : std::optional(record_.back());
+    }
+
+    bool equals(std::vector<Value> const& record) const {
+        auto lock = std::scoped_lock(mtx_);
+        return record_ == record;
+    }
+
+    /**
+     * @brief Wait until all elements of the expected sequence appear in order within the record.
+     * The elements do not need to be contiguous — other entries may appear in between.
+     * Returns true if the ordered subsequence was found within the timeout.
+     */
+    [[nodiscard]] bool wait_for_sequence(std::vector<Value> const& _expected, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        return wait_for(
+                [&_expected](auto const& record) {
+                    auto it = record.begin();
+                    for (auto const& val : _expected) {
+                        it = std::find(it, record.end(), val);
+                        if (it == record.end()) {
+                            return false;
+                        }
+                        ++it;
+                    }
+                    return true;
+                },
+                timeout);
+    }
+
+    std::string to_string() const {
+        auto lock = std::scoped_lock(mtx_);
+        std::stringstream s;
+        s << "[";
+        bool first = true;
+        for (auto const& val : record_) {
+            if (first) {
+                first = false;
+            } else {
+                s << ", ";
+            }
+            s << val;
+        }
+        s << "]";
+
+        return s.str();
+    }
+
+private:
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    std::vector<Value> record_;
+};
+
+template<typename Value>
+std::ostream& operator<<(std::ostream& _out, attribute_recorder<Value> const& _m) {
+    _out << _m.to_string();
+    return _out;
+}
+}

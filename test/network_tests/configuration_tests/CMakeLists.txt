@@ -1,0 +1,31 @@
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+project(configuration_tests LANGUAGES CXX)
+
+# Configure necessary files into the build directory.
+set(configuration_files
+    configuration_test.json
+)
+configure_files("${configuration_files}")
+
+add_executable(configuration_test
+    configuration_test.cpp
+)
+
+# Link vsomeip configuration libraries.
+target_link_libraries(configuration_test
+    ${VSOMEIP_NAME}-test
+    ${VSOMEIP_NAME}-cfg-test
+)
+
+# Add build dependencies and link libraries to executable.
+targets_link_default_libraries(configuration_test)
+targets_add_default_dependencies(configuration_test)
+
+add_custom_test(
+    NAME configuration_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/configuration_test
+)

@@ -1,0 +1,58 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include "abstract_netlink_connector.hpp"
+#include "abstract_timer.hpp"
+#include "tcp_socket.hpp"
+#include "udp_socket.hpp"
+#if defined(__linux__) || defined(__QNX__)
+#include "uds_acceptor.hpp"
+#include "uds_socket.hpp"
+#endif
+
+#include <boost/asio/io_context.hpp>
+
+#if defined(__linux__) || defined(__QNX__)
+#include <boost/asio/local/stream_protocol.hpp>
+#endif
+#include <functional>
+
+namespace vsomeip_v3 {
+
+class abstract_socket_factory {
+public:
+    virtual ~abstract_socket_factory() = default;
+
+    static abstract_socket_factory* get();
+
+#if defined(__linux__)
+    // netlink needs to be faked in order to test local-tcp connection handling
+    virtual std::shared_ptr<abstract_netlink_connector> create_netlink_connector(boost::asio::io_context& _io,
+                                                                                 const boost::asio::ip::address& _address,
+                                                                                 const boost::asio::ip::address& _multicast_address,
+                                                                                 bool _is_requiring_link = true) = 0;
+#endif
+
+    virtual std::unique_ptr<tcp_socket> create_tcp_socket(boost::asio::io_context& _io) = 0;
+    virtual std::unique_ptr<tcp_acceptor> create_tcp_acceptor(boost::asio::io_context& _io) = 0;
+    virtual std::unique_ptr<udp_socket> create_udp_socket(boost::asio::io_context& _io) = 0;
+
+#if defined(__linux__) || defined(__QNX__)
+    virtual std::unique_ptr<uds_socket> create_uds_socket(boost::asio::io_context& _io) = 0;
+    virtual std::unique_ptr<uds_acceptor> create_uds_acceptor(boost::asio::io_context& _io) = 0;
+#endif
+
+    virtual std::unique_ptr<abstract_timer> create_timer(boost::asio::io_context& _io) = 0;
+};
+
+// In order for this function to change the globally used abstract_socket_factory,
+// it needs to be called before the first call of abstract_socket_factory::get().
+// If this function is not called the asio_socket_factory is used as the global
+// factory.
+void set_abstract_factory(std::shared_ptr<abstract_socket_factory> ptr);
+
+}

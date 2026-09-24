@@ -1,0 +1,37 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+# Initialize error tracking
+FAIL=0
+
+export VSOMEIP_CONFIGURATION=security_test_local_config.json
+
+export VSOMEIP_APPLICATION_NAME=routingmanagerd
+# start daemon
+routingmanagerd &
+PID_VSOMEIPD=$!
+
+export VSOMEIP_APPLICATION_NAME=service-sample
+./security_test_service --local &
+PID_SERVICE=$!
+
+export VSOMEIP_APPLICATION_NAME=client-sample
+./security_test_client --local
+PID_CLIENT=$!
+
+wait $PID_CLIENT || FAIL=$(($FAIL+1))
+
+wait $PID_SERVICE || FAIL=$(($FAIL+1))
+
+kill $PID_VSOMEIPD
+wait $PID_VSOMEIPD || FAIL=$(($FAIL+1))
+
+exit $FAIL

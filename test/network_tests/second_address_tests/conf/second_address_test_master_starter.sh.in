@@ -1,0 +1,60 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+FAIL=0
+
+if [ $# -lt 2 ]
+then
+    echo "Please pass a operation and communication mode to this script."
+    echo "For example: $0 SERVICE UDP"
+    echo "Valid operation modes include [SERVICE, CLIENT]"
+    echo "Valid communication modes include [UDP, TCP]"
+    exit 1
+fi
+
+OPERATIONMODE=$1
+COMMUNICATIONMODE=$2
+
+if [ "$OPERATIONMODE" = "SERVICE" ]; then
+    MASTER_APPLICATION=second_address_test_service
+    SLAVE_OPERATIONMODE="CLIENT"
+
+    if [ "$COMMUNICATIONMODE" = "TCP" ]; then
+        export VSOMEIP_CONFIGURATION=second_address_test_master_service_tcp.json
+    elif [ "$COMMUNICATIONMODE" = "UDP" ]; then
+        export VSOMEIP_CONFIGURATION=second_address_test_master_service_udp.json
+    fi
+
+elif [ "$OPERATIONMODE" = "CLIENT" ]; then
+    MASTER_APPLICATION=second_address_test_client
+    SLAVE_OPERATIONMODE="SERVICE"
+    export VSOMEIP_CONFIGURATION=second_address_test_master_client.json
+fi
+
+export VSOMEIP_APPLICATION_NAME=routingmanagerd
+routingmanagerd &
+PID_VSOMEIPD=$!
+
+export VSOMEIP_APPLICATION_NAME=$MASTER_APPLICATION
+./$MASTER_APPLICATION $COMMUNICATIONMODE &
+PID_MASTER=$!
+
+exec_slave "./second_address_test_slave_starter.sh $SLAVE_OPERATIONMODE $COMMUNICATIONMODE"
+PID_SLAVE=$!
+
+wait $PID_MASTER || FAIL=$(($FAIL+1))
+wait $PID_SLAVE || FAIL=$(($FAIL+1))
+
+kill $PID_VSOMEIPD
+wait $PID_VSOMEIPD || FAIL=$(($FAIL+1))
+
+# Check if everything went well
+exit $FAIL

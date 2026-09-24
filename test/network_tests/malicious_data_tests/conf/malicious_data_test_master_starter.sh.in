@@ -1,0 +1,54 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+# Purpose: This script is needed to start the services with
+# one command. This is necessary as ctest - which is used to run the
+# tests - isn't able to start multiple binaries for one testcase. Therefore
+# the testcase simply executes this script. This script then runs the services
+# and checks that all exit successfully.
+
+FAIL=0
+
+if [ $# -lt 1 ]
+then
+    echo "Please pass a test mode to this script."
+    echo "For example: $0 MALICIOUS_EVENTS"
+    echo "Valid subscription types include:"
+    echo "            [MALICIOUS_EVENTS, PROTOCOL_VERSION, MESSAGE_TYPE, RETURN_CODE, WRONG_HEADER_FIELDS_UDP]"
+    exit 1
+fi
+TESTMODE=$1
+
+export VSOMEIP_CONFIGURATION=malicious_data_test_master.json
+
+export VSOMEIP_APPLICATION_NAME=routingmanagerd
+# start daemon
+routingmanagerd &
+PID_VSOMEIPD=$!
+
+# Start the services
+export VSOMEIP_APPLICATION_NAME=service-sample
+./malicious_data_test_service $TESTMODE &
+PID_SERVICE=$!
+
+exec_slave "./malicious_data_test_msg_sender @TEST_IP_MASTER@ @TEST_IP_SLAVE@ $TESTMODE"
+PID_CLIENT=$!
+
+# Wait for the service and client to finish
+wait $PID_CLIENT || FAIL=$(($FAIL+1))
+wait $PID_SERVICE || FAIL=$(($FAIL+1))
+
+# Kill the daemon after the service ends
+kill $PID_VSOMEIPD
+wait $PID_VSOMEIPD || ((FAIL+=1))
+
+# Check if everything went well
+exit $FAIL

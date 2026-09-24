@@ -1,0 +1,466 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include "sockets/fake_tcp_socket_handle.hpp"
+#include "sockets/fake_udp_socket_handle.hpp"
+#include "fake_netlink_connector.hpp"
+
+#include <boost/asio/ip/address.hpp>
+#include <cstdint>
+#include <mutex>
+#include <map>
+#include <set>
+#include <memory>
+#include <tuple>
+#include <optional>
+
+namespace vsomeip_v3::testing {
+
+class app_connection;
+
+using fd_t = unsigned short;
+
+/**
+ * Helper that
+ * 1. connects fake socket and acceptors with app names,
+ * 2. keeps track of connections,
+ * 3. provides an API for error injections into the fake sockets
+ **/
+class socket_manager : public std::enable_shared_from_this<socket_manager> {
+public:
+    ~socket_manager();
+    /**
+     * this function will assume that the next unknown
+     * io_context memory address is belongig to the passed in name.
+     * This mapping is used later to identify connections between different
+     * applications.
+     */
+    void add(std::string const& app);
+
+    /**
+     * Because some sockets are not closed explicitly
+     * (e.g. local_tcp_server_endpoint sockets that were connected to),
+     * this function guarantees that these sockets belonging to the application,
+     * do not try to use the io_context upon closing.
+     * Note that connected sockets (from other applications) are still receiving
+     * connection errors.
+     */
+    void clear_handler(std::string const& app);
+
+    /**
+     * Waits until either the timeout expires, or the name could be associated
+     * with the memory address of some boost::asio::io_context.
+     * @see socket_manager::add()
+     */
+    [[nodiscard]] bool await_assignment(std::string const& _app, std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     *
+     */
+    void fail_on_bind(std::string const& _app, bool fail);
+
+    /**
+     * Like fail_on_bind, but ONLY affects UDS acceptor binds (i.e. the local UDS server
+     * creation path). TCP/UDP socket binds are unaffected, so the app can still connect
+     * to the router. Use this to simulate /var/run/someip not being ready at startup.
+     */
+    void fail_on_uds_bind(std::string const& _app, bool fail);
+
+    /**
+     * Waits until either the timeout expires, or the application associated
+     * with this name called async_accept on some fake_acceptor.
+     * Useful to await the start of the routing application.
+     */
+    [[nodiscard]] bool await_connectable(std::string const& _app, std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Waits until either the timeout expires, or the application associated
+     * with _from established a connection to the application associated with _server.
+     *
+     * Note the implication is that the _server application called async_accept on
+     * a fake_tcp_acceptor with some endpoint and that _from called async_connect
+     * with some fake_tcp_socket towards this very endpoint.
+     */
+    [[nodiscard]] bool await_connection(std::string const& _client, std::string const& _server, std::chrono::milliseconds _timeout);
+
+    /**
+     * Counts how often the directed connection was established.
+     */
+    size_t count_established_connections(std::string const& _client, std::string const& _server);
+
+    /**
+     * Retrieves the socket type used by the connection between _client and _server.
+     * @return socket_type if the connection exists, empty optional otherwise.
+     */
+    [[nodiscard]] std::optional<socket_type> get_connection_socket_type(std::string const& _client, std::string const& _server);
+
+    /**
+     * Searches for a directed connection _client_name to _server_name and calls
+     * fake_tcp_socket_handle::disconnect and accumulates the result.
+     */
+    [[nodiscard]] bool disconnect(std::string const& _client_name, std::optional<boost::system::error_code> _client_error,
+                                  std::string const& _server_name, std::optional<boost::system::error_code> _server_error,
+                                  socket_role _side_to_disconnect = socket_role::unspecified);
+
+    /**
+     * Injects the handed over errors on connections attemps to _app_name.
+     * The first error in the vector is the first to be injected.
+     **/
+    void report_on_connect(std::string const& _app_name, std::vector<boost::system::error_code> _next_errors);
+
+    /**
+     * Ignores connection attemps towards _app_name for _number_of_ignored_connections
+     * times. This implies that no error handler will be invoked.
+     **/
+    void ignore_connections(std::string const& _app_name, size_t _number_of_ignored_connections);
+
+    /**
+     * Puts the associated fake_tcp_acceptor_handle into a state in which any attempt to connect
+     * to _app_name is ignored as long as _ignore_connections is set to be true.
+     * This is useful to have control "how long" a client might act as if he would be suspended.
+     **/
+    void set_ignore_connections(std::string const& _app_name, bool _ignore_connections);
+
+    /**
+     * Adds the provided ip address to the group of ips that should not be able to connect
+     * to outside networks.
+     * Used to simulate a loss of network interface.
+     */
+    void set_ignore_ip(boost::asio::ip::address _ip, bool _ignore_connections);
+
+    /**
+     * Ensures that write calls from _client are reported to be successful, but if _delay == true,
+     * the callback of _server is not invoked, but remains waiting until _delay turns true again.
+     *
+     * @return false, if the connection does not exist.
+     **/
+    [[nodiscard]] bool delay_message_processing(std::string const& _client, std::string const& _server, bool _delay,
+                                                socket_role _role = socket_role::server);
+
+    /**
+     * Finds the UDP socket bound to @param _ep and delays its outgoing message processing.
+     * @param _ep must be the sending endpoint.
+     *
+     * @return false, if no UDP socket matching _ep was found.
+     **/
+    [[nodiscard]] bool delay_boardnet_sending(boost::asio::ip::udp::endpoint const& _ep, bool _delay);
+
+    /**
+     * Ensures that a broken connection is not propagated, when the connected socket is closed.
+     * The connection is identified by:
+     * _client -> _server.
+     * if _ignore_in_client is true, the _client socket will ignore closings of _server,
+     * if _ignore_in_server is true, the _server socket will ignore closings of _client.
+     *
+     * Closing can later be triggered with disconnect()
+     **/
+    [[nodiscard]] bool set_ignore_inner_close(std::string const& _client, bool _ignore_in_client, std::string const& _server,
+                                              bool _ignore_in_server);
+
+    /**
+     * Ensures that a async_receive will not fail, if the other socket disconnected.
+     * This is helpful for simulating suspend sequences.
+     * Note: This option is permanent to the connection and needs to be actively reset.
+     * if ignore == true:
+     *      if _role == client or unspecified -> client will ignore the error
+     *      if _role == server or unspecified -> server will ignore the error
+     **/
+    void set_ignore_nothing_to_read_from(std::string const& _client, std::string const& _server, socket_role _role, bool _ignore);
+
+    /**
+     * searches for the _client -> _server connected sockets and demands from _client to block execution
+     * for _client_block_time when close is invoked, equivalent for _server with _server_block_time.
+     * @see fake_tcp_socket_handle::block_on_close_for() for further details.
+     *
+     * @return true, if all non nullopts could be forwarded
+     **/
+    [[nodiscard]] bool block_on_close_for(std::string const& _client, std::optional<std::chrono::milliseconds> _client_block_time,
+                                          std::string const& _server, std::optional<std::chrono::milliseconds> _server_block_time);
+
+    /**
+     * Clears all received commands in the _server socket from the _client -> _server connection
+     **/
+    void clear_command_record(std::string const& _client, std::string const& _server);
+
+    [[nodiscard]] bool setup_data_pipe(std::string const& _client, std::string const& _server, socket_role _applied_on,
+                                       std::shared_ptr<data_pipe> const& _pipe);
+
+    /**
+     * Replaces a data pipe for udp endpoints.
+     * Application name needs to be parameterized to identify multicast endpoints.
+     * If socket role is set as client, the receiving pipe is replaced, otherwise the change is applied to the endpoint sending pipe.
+     * @note See @ref sd_gate class documentation for multicast gate lifecycle details.
+     **/
+    bool setup_data_pipe(boost::asio::ip::udp::endpoint const& _ep, std::string const& _app_name, socket_role _applied_on,
+                         std::shared_ptr<data_pipe> const& _pipe);
+
+    /**
+     * Waits for _id to be received in the _client -> _server connection for _timeout amount of time.
+     * @return false, if the _id was not received within time.
+     **/
+    [[nodiscard]] bool wait_for_command(std::string const& _client, std::string const& _server, protocol::id_e _id, socket_role _waiting,
+                                        std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Waits for _id to be the last received message in the _client -> _server connection for _timeout amount of time.
+     * @return false, if the _id was not received within time.
+     **/
+    [[nodiscard]] bool wait_for_last_command(std::string const& _client, std::string const& _server, socket_role _waiting,
+                                             protocol::id_e _id, std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Waits for the _client -> _server connection to be dropped.
+     * If there is no record of this connection it first awaited to have this connection established,
+     * If there is currently a connection it is waited until one socket disconnects,
+     * If there is no longer any connection true is returned.
+     **/
+    [[nodiscard]] bool wait_for_connection_drop(std::string const& _client, std::string const& _server,
+                                                std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Set whether a write on a disconnected socket should result in a silent error, or a broken pipe
+     */
+    void set_ignore_broken_pipe(std::string const& _app_name, bool _set);
+
+    /**
+     * Called by a fake_tcp_socket_handle when a broken pipe situation occurs.
+     * @return true, if the broken pipe should be ignored.
+     **/
+    [[nodiscard]] bool ignore_broken_pipe(fake_tcp_socket_handle const& _handle);
+
+    /**
+     * associates a fake_tcp_socket_handle to a io_context and therefore to an app_name.
+     **/
+    void add_socket(std::weak_ptr<fake_socket_handle> _state, boost::asio::io_context* _io, socket_type _type);
+
+    /**
+     * associates a fake_netlink_connector to an io_context and therefore to an app_name.
+     */
+    void add_netlink_connector(std::weak_ptr<fake_netlink_connector> _connector, boost::asio::io_context* _io);
+
+    /**
+     * removes the fd from the internal map of fds.
+     **/
+    void remove(fd_t fd);
+
+    /**
+     * associates a fake_tcp_acceptor_handle to a io_context and therefore to an app_name.
+     **/
+    void add_acceptor(std::weak_ptr<fake_tcp_acceptor_handle> _state, boost::asio::io_context* _io, socket_type _type);
+
+    /**
+     * removes the fd from the internal map of fds.
+     **/
+    void remove_acceptor(fd_t _fd, boost::asio::ip::tcp::endpoint _ep);
+
+    /**
+     * removes the fd from the internal map of fds.
+     **/
+    void remove_acceptor(fd_t _fd, uds_endpoint _ep);
+
+    /**
+     * associates the fake_tcp_acceptor_handle to the endpoint. This allows fake_tcp_socket_handles
+     * to try to connect to the acceptor.
+     **/
+    [[nodiscard]] bool bind_acceptor(boost::asio::ip::tcp::endpoint const& _ep, std::weak_ptr<fake_tcp_acceptor_handle> _state);
+
+    /**
+     * associates the fake_tcp_acceptor_handle to the endpoint. This allows fake_tcp_socket_handles
+     * to try to connect to the acceptor.
+     **/
+    [[nodiscard]] bool bind_acceptor(uds_endpoint const& _ep, std::weak_ptr<fake_tcp_acceptor_handle> _state);
+
+    /**
+     **/
+    [[nodiscard]] bool bind_socket(fake_tcp_socket_handle const& _handle, boost::asio::ip::tcp::endpoint const& _ep, fd_t _fd);
+
+    [[nodiscard]] bool bind_socket(std::shared_ptr<fake_udp_socket_handle> _handle, boost::asio::ip::udp::endpoint const& _ep, fd_t _fd);
+
+    /**
+     * Searches for a fake_tcp_acceptor_handle @see socket_manager::bind_acceptor(),
+     * and forwards the connect request from the passed in handle.
+     **/
+    void connect(boost::asio::ip::tcp::endpoint const& _ep, fake_tcp_socket_handle& _connecting, connect_handler _handler);
+
+    /**
+     * Searches for a fake_tcp_acceptor_handle @see socket_manager::bind_acceptor(),
+     * and forwards the connect request from the passed in handle.
+     **/
+    void connect(uds_endpoint const& _ep, fake_tcp_socket_handle& _connecting, connect_handler _handler);
+
+    /**
+     * Helper to let the socket_manager know that some acceptor started to wait for connections.
+     **/
+    void awaiting();
+
+    /**
+     * Prepares a drop for the specific vsomeip command @param _id from @param _from towards @param _to, gives a future for when it happens
+     *
+     * NOTE: not composeable, difficut to use, take care..
+     */
+    std::future<protocol::id_e> drop_command_once(std::string const& _from, std::string const& _to, protocol::id_e _id);
+
+    /**
+     * Forces the delivery of payload @param _payload from @param _client to @param _server with vsomeip message parsing
+     */
+    bool inject_command_tcp(std::string const& _client, std::string const& _server, std::vector<unsigned char>& _payload);
+
+    /**
+     * Forces the delivery of payload @param _payload from @param _client to @param _server with no parsing
+     */
+    bool inject_message_tcp(std::string const& _client, std::string const& _server, std::vector<unsigned char>& _payload);
+
+    /**
+     * Forces the delivery of a payload @param _payload from @param _src to @param _dst via udp.
+     */
+    bool inject_message_udp(boost::asio::ip::udp::endpoint _src, boost::asio::ip::udp::endpoint _dst, std::vector<unsigned char>& _payload);
+
+    /**
+     * Forces the delivery of a payload @param _payload from @param _src to @param _dst via udp multicast.
+     */
+    bool inject_message_udp_multicast(boost::asio::ip::udp::endpoint _src, boost::asio::ip::udp::endpoint _dst,
+                                      std::vector<unsigned char>& _payload);
+
+    /**
+     * Allows setting a custom vsomeip command controller @param _handler to be invoked every time a message
+     * is parsed, enables the test to decide what can be delivered or to assert based on the payload.
+     * The _sender argument specifies which messages to parse.
+     * if _sender == client -> only parses messages from the client to the server
+     * if _sender == server -> reverse
+     * if _sender == unspecified -> both
+     */
+    void set_custom_command_handler(std::string const& _client, std::string const& _server, vsomeip_command_handler const& _handler,
+                                    socket_role _sender = socket_role::unspecified);
+
+    /**
+     * Invoked by a connected socket upon closing the connection, if the connection
+     * does no longer contain connected sockets connection drop will be notified
+     **/
+    void check_connection(std::string const& _one, std::string const& _two, socket_role _closing);
+
+    /**
+     * @brief Waits until @param _multicast group has at least @param _min_count sockets joined, or @param _timeout elapses.
+     */
+    [[nodiscard]] bool await_multicast_join(boost::asio::ip::address const& _multicast, size_t _min_count = 1,
+                                            std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * @brief Adds member @param _fd to virtual multicast group @param _multicast.
+     *
+     * @param _multicast Multicast address to be joined.
+     * @param _fd member to join group.
+     * @param _app_name application name of member trying to join group.
+     */
+    void join_multicast_group(boost::asio::ip::address _multicast, fd_t _fd, std::string _app_name);
+
+    /**
+     * @brief Removes member @param _fd from virtual multicast group @param _multicast.
+     *
+     * @param _multicast Multicast address to be leaved.
+     * @param _fd member to leave group.
+     */
+    void leave_multicast_group(boost::asio::ip::address _multicast, fd_t _fd);
+
+    void send_someip(std::vector<unsigned char> const& _buffer, boost::asio::ip::udp::endpoint _src, boost::asio::ip::udp::endpoint _dst);
+
+    /*
+     * Inserts an error into the next receive operation performed by the given endpoint.
+     *
+     * Returns `true` if successful.
+     */
+    [[nodiscard]] bool insert_udp_recv_error(const boost::asio::ip::udp::endpoint& _endpoint, boost::system::error_code _ec);
+
+    /*
+     * Inserts an error into the next send operation performed by the given endpoint.
+     *
+     * Returns `true` if successful.
+     */
+    [[nodiscard]] bool insert_udp_send_error(const boost::asio::ip::udp::endpoint& _endpoint, boost::system::error_code _ec);
+
+    /**
+     * @brief Set control flag to prevent application @param _router to join any multicast group.
+     */
+    void ignore_router_all_multicast_joins(std::string _router, bool _ignore);
+
+    /**
+     * @brief Waits for _message to be received by the router _ep for _timeout amount of time.
+     * @return false, if the _messaage was not received within time.
+     */
+    [[nodiscard]] bool wait_for_sd_message(boost::asio::ip::udp::endpoint const& _ep, someip_sd_record_message _message,
+                                           std::chrono::milliseconds _timeout);
+
+    /**
+     * Clears the sd message record for \param _ep.
+     **/
+    void clear_sd_message_record(boost::asio::ip::udp::endpoint const& _ep);
+
+    /**
+     * Set the netlink connector state to the provided one by calling its handler.
+     */
+    void set_netlink_connector_state(std::string const& _client, fake_netlink_connector::state_e _state);
+
+    /**
+     * Allows connections to be re-established and communication unlocked to the provided ip address.
+     * Only used for external connections
+     */
+    void allow_ip_address_to_external(boost::asio::ip::address _ip, bool _allow);
+
+    /**
+     * Returns and removes from stashed_netconn_states_ the state for the netlink connector
+     * saved for the provided io context
+     */
+    std::optional<fake_netlink_connector::state_e> extract_state(boost::asio::io_context* _io);
+
+private:
+    void try_add(boost::asio::io_context* _io, fd_t _fd, char const* _type);
+    std::shared_ptr<app_connection> get_or_create_connection(std::string const& _client, std::string const& _server);
+
+    struct pending_someip_pipe {
+        std::shared_ptr<data_pipe> pipe_;
+        socket_role applied_on_;
+    };
+
+    std::mutex mtx_;
+    std::condition_variable assignment_cv_;
+    std::condition_variable connectable_cv_;
+    std::condition_variable multicast_join_cv_;
+    std::atomic<fd_t> next_fd_{1};
+    std::map<fd_t, std::weak_ptr<fake_socket_handle>> fd_to_handle_;
+    std::map<fd_t, std::weak_ptr<fake_tcp_acceptor_handle>> fd_to_acceptor_states_;
+    std::map<boost::asio::ip::tcp::endpoint, std::weak_ptr<fake_tcp_acceptor_handle>> ep_to_acceptor_states_;
+    std::map<uds_endpoint, std::weak_ptr<fake_tcp_acceptor_handle>> uds_to_acceptor_states_;
+    std::map<std::string, boost::asio::io_context*> name_to_context_;
+    std::map<boost::asio::io_context*, std::string> context_to_name_;
+    std::map<boost::asio::io_context*, std::vector<fd_t>> context_to_fd_;
+    std::map<std::string, size_t> connection_name_to_connection_count_;
+    std::map<std::string, std::shared_ptr<app_connection>> connections_;
+    std::map<boost::asio::io_context*, std::weak_ptr<fake_netlink_connector>> context_to_netlink_conn_;
+    std::map<std::string, fake_netlink_connector::state_e> stashed_netconn_states_;
+    // these timers are not supposed to ever expire.
+    // Instead the callback lifetime of these timers ensures that
+    // the socket_manager will be notified once the io_context is destroyed,
+    // which is then used to ensure that the referenced io_context (that is now invalid),
+    // is no longer used to schedule any other task.
+    std::map<std::string, std::unique_ptr<boost::asio::steady_timer>> timers_;
+
+    std::map<std::string, size_t> app_name_to_ignore_connections_count_;
+    std::map<std::string, std::vector<boost::system::error_code>> app_to_next_connection_errors_;
+    std::map<boost::asio::ip::address, std::set<fd_t>> multicast_to_fds_;
+    std::map<boost::asio::ip::tcp::endpoint, fd_t> endpoint_tcp_to_fd_;
+    std::map<boost::asio::ip::udp::endpoint, fd_t> endpoint_udp_to_fd_;
+    std::map<std::string, std::set<std::pair<boost::asio::ip::udp::endpoint, fd_t>>> binded_multicast_endpoints_;
+    // persisted delay state per sending endpoint; applied immediately if already bound, or on bind otherwise
+    std::map<boost::asio::ip::udp::endpoint, bool> udp_sending_delay_;
+    std::map<std::string, std::map<boost::asio::ip::udp::endpoint, pending_someip_pipe>> pending_someip_pipe_;
+    std::set<std::string> connections_to_ignore_;
+    std::set<boost::asio::ip::address> ignored_networks_;
+    std::set<std::string> fail_on_bind_;
+    std::set<std::string> fail_on_uds_bind_;
+    std::set<std::string> ignore_broken_pipe_;
+    std::set<std::string> ignore_all_multicast_joins_;
+};
+}

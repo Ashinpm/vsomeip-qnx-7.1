@@ -1,0 +1,46 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+# Unofficial Bash Strict Mode
+set -eo pipefail
+IFS=$'\n\t'
+
+# Name of the script.
+SCRIPT=$(basename "$0")
+readonly SCRIPT
+
+# Runs the test client.
+function main() {
+    echo -e "$SCRIPT: Starting test client."
+
+    # Start the test client.
+    export VSOMEIP_CONFIGURATION=debounce_epsilon_test_client.json
+    export VSOMEIP_APPLICATION_NAME=client-sample
+    ./debounce_epsilon_test_client &
+    client_pid="$!"
+
+    echo -e "$SCRIPT: Starting test service."
+
+    # Run the test service.
+    exec_slave "./debounce_epsilon_test_service.sh"
+    SLAVE_PID=$!
+
+    echo -e "$SCRIPT: Waiting for the test client to stop."
+
+    FAIL=0
+    # Wait for the client to stop.
+    wait "$client_pid" || FAIL=$(($FAIL+1))
+    wait "$SLAVE_PID"|| FAIL=$(($FAIL+1))
+    return $FAIL
+}
+
+# Entrypoint of the script.
+main "$@"

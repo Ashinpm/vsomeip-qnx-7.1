@@ -1,0 +1,396 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include <map>
+#include <mutex>
+#include <atomic>
+#include <tuple>
+#include <condition_variable>
+
+#include <boost/asio/steady_timer.hpp>
+
+#include <vsomeip/enumeration_types.hpp>
+#include <vsomeip/handler.hpp>
+#include <vsomeip/primitive_types.hpp>
+
+#include "routing_manager_base.hpp"
+#include "event_dispatcher.hpp"
+#include "types.hpp"
+#include "../../protocol/include/protocol.hpp"
+#include "../../endpoints/include/local_endpoint_manager_host.hpp"
+
+namespace vsomeip_v3 {
+
+class configuration;
+class event;
+class timer;
+class local_server;
+class routing_manager_host;
+class routing_client_state_machine;
+
+namespace protocol {
+class offered_services_response_command;
+class update_security_credentials_command;
+}
+
+class routing_manager_client : public routing_manager_base,
+                               public local_endpoint_manager_host,
+                               public event_dispatcher,
+                               public routing_host,
+                               public std::enable_shared_from_this<routing_manager_client> {
+    struct subscription_data_t;
+
+public:
+    routing_manager_client(routing_manager_host* _host, bool _client_side_logging,
+                           const std::set<std::tuple<service_t, instance_t>>& _client_side_logging_filter);
+    virtual ~routing_manager_client();
+
+    void init();
+    void start();
+    void stop();
+
+    std::shared_ptr<configuration> get_configuration() const;
+
+    void ping_host();
+    void on_pong(client_t _client);
+
+    bool offer_service(client_t _client, service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor);
+
+    void stop_offer_service(client_t _client, service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor);
+
+    void request_service(client_t _client, service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor);
+
+    void release_service(client_t _client, service_t _service, instance_t _instance);
+
+    void subscribe(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, major_version_t _major,
+                   event_t _event, const std::shared_ptr<debounce_filter_impl_t>& _filter);
+
+    void unsubscribe(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event);
+    void unsubscribe_base(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                          std::scoped_lock<std::mutex> const& _lock);
+
+    bool send(client_t _client, const byte_t* _data, uint32_t _size, instance_t _instance, bool _reliable, client_t _bound_client,
+              const vsomeip_sec_client_t* _sec_client, uint8_t _status_check, bool _sent_from_remote, bool _force);
+
+    bool send_to(const client_t _client, const std::shared_ptr<endpoint_definition>& _target, std::shared_ptr<message> _message);
+
+    bool send_to(const std::shared_ptr<endpoint_definition>& _target, const byte_t* _data, uint32_t _size, instance_t _instance);
+
+    void register_event(client_t _client, service_t _service, instance_t _instance, event_t _notifier,
+                        const std::set<eventgroup_t>& _eventgroups, const event_type_e _type, reliability_type_e _reliability,
+                        std::chrono::milliseconds _cycle, bool _change_resets_cycle, bool _update_on_change,
+                        epsilon_change_func_t _epsilon_change_func, bool _is_provided);
+
+    void unregister_event(client_t _client, service_t _service, instance_t _instance, event_t _notifier, bool _is_provided);
+
+    void on_routing_info(const byte_t* _data, uint32_t _size);
+
+    void register_client_error_handler(client_t _client, const std::shared_ptr<local_endpoint>& _endpoint);
+    void cleanup_client(client_t _client, bool _due_to_error);
+
+    // local_endpoint_manager_host
+    client_t get_client_id() override;
+    void set_port(port_t _port) override;
+    bool get_connection_param(client_t _client, boost::asio::ip::address& _address, port_t& _port) override;
+    void register_error_handler(client_t _client, std::shared_ptr<local_endpoint> _ep) override;
+
+    void on_offered_services_info(protocol::offered_services_response_command& _command);
+
+    void send_get_offered_services_info(client_t _client, offer_type_e _offer_type);
+    bool send(client_t _client, std::shared_ptr<message> _message, bool _force);
+    bool is_available(service_t _service, instance_t _instance, major_version_t _major) const;
+
+    // that this function is provided to the application_impl feels pretty strange
+    std::shared_ptr<serviceinfo> find_service(service_t _service, instance_t _instance) const override;
+    std::set<std::shared_ptr<event>> find_consumed_events(service_t _service, instance_t _instance, eventgroup_t _eventgroup) const;
+    void notify_one(service_t _service, instance_t _instance, event_t _event, std::shared_ptr<payload> _payload, client_t _client,
+                    bool _force);
+    void notify(service_t _service, instance_t _instance, event_t _event, std::shared_ptr<payload> _payload, bool _force);
+    /**
+     * @brief Notify current value for event/eventgroup
+     *
+     * Caller *MUST* hold `provider_mutex_` through not only call, but also during the subscription insertion + subscription ack/nack
+     */
+    void notify_one_current_value(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                                  std::scoped_lock<std::mutex> const& _lock);
+    std::shared_ptr<event> find_provided_event(service_t _service, instance_t _instance, event_t _event) const;
+    std::shared_ptr<event> find_consumed_event(service_t _service, instance_t _instance, event_t _event) const;
+
+private:
+    void unregister_event_base(client_t _client, service_t _service, instance_t _instance, event_t _event, bool _is_provided);
+
+    std::shared_ptr<event> find_provided_event(service_t _service, instance_t _instance, event_t _event,
+                                               std::scoped_lock<std::mutex> const& _lock) const;
+    std::shared_ptr<event> find_consumed_event(service_t _service, instance_t _instance, event_t _event,
+                                               std::scoped_lock<std::mutex> const& _lock) const;
+    void remove_pending_subscription(service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                                     std::scoped_lock<std::mutex> const&);
+
+    client_t get_client_by_address(const boost::asio::ip::address& _address, port_t _port) const;
+
+    [[nodiscard]] bool is_local_client(client_t _client) const override;
+
+    void register_application(client_t _client);
+
+    void reconnect();
+
+    void send_pong() const;
+
+    bool send_offer_service(client_t _client, service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor);
+
+    void send_release_service(client_t _client, service_t _service, instance_t _instance);
+
+    [[nodiscard]] bool send_pending_event_registrations(client_t _client);
+
+    void send_register_event(client_t _client, service_t _service, instance_t _instance, event_t _notifier,
+                             const std::set<eventgroup_t>& _eventgroups, const event_type_e _type, reliability_type_e _reliability,
+                             bool _is_provided, bool _is_cyclic);
+
+    void send_subscribe(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, major_version_t _major,
+                        event_t _event, const std::shared_ptr<debounce_filter_impl_t>& _filter);
+
+    void send_subscribe_nack(client_t _subscriber, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                             remote_subscription_id_t _id);
+
+    void send_subscribe_ack(client_t _subscriber, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                            remote_subscription_id_t _id);
+
+    void on_subscribe_nack(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event);
+
+    void on_subscribe_ack(client_t _client, service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event);
+
+    void cache_event_payload(const std::shared_ptr<message>& _message);
+
+    void on_stop_offer_service(service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor,
+                               std::scoped_lock<std::mutex> const& _consumer_lock);
+
+    [[nodiscard]] bool send_pending_commands(std::scoped_lock<std::mutex> const& _consumer_lock);
+
+    void init_receiver_side([[maybe_unused]] std::unique_lock<std::mutex> const& _receive_lock);
+
+    void notify_remote_initially(service_t _service, instance_t _instance, eventgroup_t _eventgroup,
+                                 std::scoped_lock<std::mutex> const& _lock);
+
+    uint32_t get_remote_subscriber_count(service_t _service, instance_t _instance, eventgroup_t _eventgroup, bool _increment,
+                                         std::scoped_lock<std::mutex> const& _lock);
+    void clear_remote_subscriber_count(service_t _service, instance_t _instance, std::scoped_lock<std::mutex> const& _lock);
+
+    bool create_placeholder_event_and_subscribe(service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _notifier,
+                                                const std::shared_ptr<debounce_filter_impl_t>& _filter, client_t _client,
+                                                std::scoped_lock<std::mutex> const& _lock);
+
+    void request_debounce_timeout_cbk(boost::system::error_code const& _error);
+
+    bool send_request_services(const std::set<protocol::service>& _requests);
+
+    void send_unsubscribe_ack(service_t _service, instance_t _instance, eventgroup_t _eventgroup, remote_subscription_id_t _id);
+
+    void resend_provided_event_registrations();
+    void send_resend_provided_event_response(pending_remote_offer_id_t _id);
+    void status_log_timer_cbk(boost::system::error_code const& _error);
+    void version_log_timer_cbk(boost::system::error_code const& _error);
+#ifndef VSOMEIP_DISABLE_SECURITY
+    void send_update_security_policy_response(pending_security_update_id_t _update_id);
+    void send_remove_security_policy_response(pending_security_update_id_t _update_id);
+    void on_update_security_credentials(const protocol::update_security_credentials_command& _command);
+#endif
+    void on_client_assign_ack(const client_t& _client, bool _is_tcp);
+
+    port_t get_routing_port();
+
+    void on_suspend();
+
+    void try_to_send_before_stop();
+
+    /**
+     * @brief Remove all remote subscriptions.
+     *
+     * Currently used to clean up all remote subscriptions to services offered by this client.
+     * This action is performed when SIGUSR1 is handled by host or when the client detects the
+     * connections towards host has somehow become broken.
+     */
+    void clear_remote_subscriptions(std::scoped_lock<std::mutex> const& _provider_lock);
+
+    void restart_sender(std::unique_lock<std::mutex> const& _sender_mutex);
+    void debounce_restart_sender_done();
+
+    /// @brief Remove local client
+    ///
+    /// This will remove all information about local client, its' offered services, and also close the client endpoint to it
+    ///
+    /// @param _due_to_error, true in case of error
+    /// @param _client what client
+    /// @param _requested_services what services were requested by us and offered by client;
+    void remove_local(bool _due_to_error, client_t _client, std::set<protocol::service>& _requested_services);
+
+    void cleanup_routing_data();
+    void cleanup_subscriber(std::scoped_lock<std::mutex> const& _provider_lock);
+
+    client_t find_local_client(service_t _service, instance_t _instance) const;
+    bool is_response_allowed(client_t _sender, service_t _service, instance_t _instance, method_t _method);
+    bool send_event(client_t _client, std::shared_ptr<message> _message, bool _force) override;
+    void remove_eventgroup_info(service_t _service, instance_t _instance, eventgroup_t _eventgroup, bool _is_provided);
+    /**
+     * @brief insert subscription into events/eventgroups
+     *
+     * Caller *MUST* hold `provider_mutex_` through not only call, but also during the subscription ack/nack and initial events
+     */
+    bool insert_subscription(service_t _service, instance_t _instance, eventgroup_t _eventgroup, event_t _event,
+                             const std::shared_ptr<debounce_filter_impl_t>& _filter, client_t _client,
+                             std::scoped_lock<std::mutex> const& _lock);
+
+    std::set<std::tuple<service_t, instance_t, eventgroup_t>> get_subscriptions(const client_t _client,
+                                                                                std::scoped_lock<std::mutex> const& _provider_lock) const;
+    bool is_subscribe_to_any_event_allowed(const vsomeip_sec_client_t* _sec_client, client_t _client, service_t _service,
+                                           instance_t _instance, eventgroup_t _eventgroup, bool _is_provided);
+    void stop_offer_service_base(client_t _client, service_t _service, instance_t _instance, major_version_t _major, minor_version_t _minor,
+                                 std::scoped_lock<std::mutex> const& _lock);
+
+    void clear_service_info(service_t _service, instance_t _instance, std::scoped_lock<std::mutex> const& _lock);
+    std::shared_ptr<serviceinfo> find_service(service_t _service, instance_t _instance, std::scoped_lock<std::mutex> const&) const;
+    void register_provider_event(client_t _client, service_t _service, instance_t _instance, event_t _notifier,
+                                 const std::set<eventgroup_t>& _eventgroups, const event_type_e _type, reliability_type_e _reliability,
+                                 std::chrono::milliseconds _cycle, bool _change_resets_cycle, bool _update_on_change,
+                                 epsilon_change_func_t _epsilon_change_func, bool _is_cache_placeholder,
+                                 std::scoped_lock<std::mutex> const& _lock);
+    void register_consumer_event(client_t _client, service_t _service, instance_t _instance, event_t _notifier,
+                                 const std::set<eventgroup_t>& _eventgroups, const event_type_e _type, reliability_type_e _reliability,
+                                 std::chrono::milliseconds _cycle, bool _change_resets_cycle, bool _update_on_change,
+                                 epsilon_change_func_t _epsilon_change_func, bool _is_cache_placeholder,
+                                 std::scoped_lock<std::mutex> const& _lock);
+
+    // event_dispatcher iface
+    session_t get_event_session() override;
+
+    bool send_event_to(const client_t _client, const std::shared_ptr<endpoint_definition>& _target,
+                       std::shared_ptr<message> _message) override;
+
+    // routing_host
+    client_t get_client() const override;
+    void on_message(const byte_t* _data, length_t _length, const local_client_data& _peer_data) override;
+    void lazy_load(const std::string& _client_host) override;
+
+    void collect_pending_subscriptions(service_t _service, instance_t _instance, major_version_t _major,
+                                       std::vector<subscription_data_t>& _collected_subscriptions, std::scoped_lock<std::mutex> const&);
+
+    // Eventgroups
+    using eventgroups_t = service_instance_map<std::unordered_map<eventgroup_t, std::shared_ptr<eventgroupinfo>>>;
+    std::shared_ptr<eventgroupinfo> find_eventgroup(service_t _service, instance_t _instance, eventgroup_t _eventgroup,
+                                                    bool _is_provided) const;
+    std::shared_ptr<eventgroupinfo> find_eventgroup(const eventgroups_t& _eventgroups, service_t _service, instance_t _instance,
+                                                    eventgroup_t _eventgroup, std::scoped_lock<std::mutex> const&) const;
+
+private:
+    std::mutex log_timer_mutex_;
+    boost::asio::steady_timer status_log_timer_;
+    boost::asio::steady_timer version_log_timer_;
+
+    mutable std::mutex sender_mutex_;
+    bool sender_debounce_active_{false};
+    bool start_sender_after_debounce_{false};
+    std::condition_variable sender_cv_;
+    std::shared_ptr<local_endpoint> sender_; // --> stub
+
+    mutable std::mutex receiver_mutex_;
+    std::shared_ptr<local_server> tcp_receiver_; // --> from everybody
+    std::shared_ptr<local_server> uds_receiver_; // --> from everybody
+
+    std::mutex pending_offers_mutex_;
+    std::set<protocol::service> pending_offers_;
+
+    struct event_data_t {
+        service_instance_t service_instance_;
+        event_t notifier_;
+        event_type_e type_;
+        reliability_type_e reliability_;
+        bool is_provided_;
+        bool is_cyclic_;
+        std::set<eventgroup_t> eventgroups_;
+
+        bool operator<(const event_data_t& _other) const {
+            if (service_instance_.service() != _other.service_instance_.service()) {
+                return service_instance_.service() < _other.service_instance_.service();
+            }
+            if (service_instance_.instance() != _other.service_instance_.instance()) {
+                return service_instance_.instance() < _other.service_instance_.instance();
+            }
+            return std::tie(notifier_, type_, reliability_, is_provided_, is_cyclic_, eventgroups_)
+                    < std::tie(_other.notifier_, _other.type_, _other.reliability_, _other.is_provided_, _other.is_cyclic_,
+                               _other.eventgroups_);
+        }
+    };
+    std::mutex pending_event_registrations_mutex_;
+    std::set<event_data_t> pending_event_registrations_;
+
+    const bool client_side_logging_;
+    const std::set<std::tuple<service_t, instance_t>> client_side_logging_filter_;
+
+    routing_mode_e const routing_mode_;
+
+    std::unique_ptr<routing_client_state_machine> state_machine_;
+
+    std::mutex lazy_load_mtx_;
+
+    std::shared_ptr<timer> sender_debounce_;
+
+    std::shared_ptr<endpoint_manager_base> ep_mgr_;
+
+    // This mutex should be used whenever the client
+    // is trying to accessing data relevant for its
+    // "provider" side (offering of events, pending_offers, offered services etc.)
+    mutable std::mutex provider_mutex_;
+    // Set of services provided by this client
+    services_t provided_services_;
+    service_instance_map<std::unordered_map<event_t, std::shared_ptr<event>>> provided_events_;
+    eventgroups_t provided_eventgroups_;
+    service_instance_map<std::map<eventgroup_t, uint32_t>> remote_subscriber_count_;
+    // lc_count is bumped on every rmc::stop and on any reconnect invocation,
+    // protected by the provider_mutex_, but it may be read during a start of the
+    // sender at an arbitrary moment in time - although it shouldn't.
+    // These reads do not require synchronization with the subscription set,
+    // nor with the stopping - this needs to be guaranteed by the rmc book-keeping itself.
+    std::atomic<uint32_t> lc_count_{0};
+
+    // This mutex should be used whenever the client
+    // is trying to access data relevant for its "consumer" side
+    mutable std::mutex consumer_mutex_;
+
+    bool request_debounce_timer_running_;
+    boost::asio::steady_timer request_debounce_timer_;
+
+    std::set<protocol::service> requests_;
+    std::set<protocol::service> requests_to_debounce_;
+    std::map<client_t, std::pair<boost::asio::ip::address, port_t>> address_table_;
+    local_service_table available_services_;
+    service_instance_map<std::set<client_t>> available_services_history_;
+    service_instance_map<std::unordered_map<event_t, std::shared_ptr<event>>> consumed_events_;
+    eventgroups_t consumed_eventgroups_;
+
+    struct subscription_data_t {
+        service_instance_t service_instance_;
+        eventgroup_t eventgroup_;
+        major_version_t major_;
+        event_t event_;
+        std::shared_ptr<debounce_filter_impl_t> filter_;
+
+        bool operator<(const subscription_data_t& _other) const {
+            if (service_instance_.service() != _other.service_instance_.service()) {
+                return service_instance_.service() < _other.service_instance_.service();
+            }
+            if (service_instance_.instance() != _other.service_instance_.instance()) {
+                return service_instance_.instance() < _other.service_instance_.instance();
+            }
+            if (eventgroup_ != _other.eventgroup_) {
+                return eventgroup_ < _other.eventgroup_;
+            }
+            return event_ < _other.event_;
+        }
+    };
+    std::set<subscription_data_t> pending_subscriptions_;
+};
+
+} // namespace vsomeip_v3

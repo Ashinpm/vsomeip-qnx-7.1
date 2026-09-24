@@ -1,0 +1,53 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+# hack to prevent ASan complaining not being the first to load
+export ASAN_OPTIONS=$ASAN_OPTIONS:verify_asan_link_order=0
+# preload "fake" gethostname lib
+export LD_PRELOAD=$PWD/libgethostname.so
+
+# Initialize error tracking
+FAIL=0
+export VSOMEIP_HOSTNAME=master
+export VSOMEIP_CONFIGURATION=/vsomeip/
+export VSOMEIP_APPLICATION_NAME=routingmanagerd
+# start daemon
+routingmanagerd &
+PID_VSOMEIPD=$!
+
+export VSOMEIP_APPLICATION_NAME=service-sample
+./lazy_load_test_service &
+PID_SERVICE=$!
+
+export VSOMEIP_CONFIGURATION=lazy_load_test_service_config.json
+export VSOMEIP_APPLICATION_NAME=client-sample_normal
+./lazy_load_test_client &
+PID_CLIENT=$!
+
+export VSOMEIP_CONFIGURATION=/vsomeip/
+export VSOMEIP_APPLICATION_NAME=client-sample-lazy
+export VSOMEIP_HOSTNAME=slave
+# allow user to access directory where descriptors are created
+chmod 777 $TEST_TMPDIR
+# start lazy client with linux user id 1 and group id 1 to use the 1_1 folder in extensions
+setpriv --reuid=1 --regid=1 --clear-groups ./lazy_load_test_lazy_client || FAIL=$(($FAIL+1))
+
+# Check client exit status
+wait $PID_CLIENT || FAIL=$(($FAIL+1))
+
+# Check service exit status
+wait $PID_SERVICE || FAIL=$(($FAIL+1))
+
+# Terminate the daemon
+kill $PID_VSOMEIPD
+wait $PID_VSOMEIPD || FAIL=$(($FAIL+1))
+
+exit $FAIL

@@ -1,0 +1,242 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#pragma once
+
+#include <stdexcept>
+
+#include "../../../implementation/endpoints/include/tcp_socket.hpp"
+
+#include "fake_tcp_socket_handle.hpp"
+
+#include <mutex>
+
+namespace vsomeip_v3::testing {
+
+struct fake_tcp_acceptor_handle;
+
+/**
+ * Test wrapper around the tcp_socket inteface that forwards each call
+ * to the owned fake_tcp_socket_handle - except for socket_options which are
+ * effectively ignored for now. Notice that the socket itself
+ * might go out of scope while the socket_handler might outlive the socket,
+ * because the socket_manager has a weak_reference to this handle that might be locked,
+ * while the socket might go out of scope. For this reason the socket_handle
+ * has no notion of the owning fake_tcp_socket class.
+ **/
+class fake_tcp_socket : public tcp_socket {
+public:
+    explicit fake_tcp_socket(std::shared_ptr<fake_tcp_socket_handle> _state) : state_(std::move(_state)) { }
+
+private:
+    [[nodiscard]] bool is_open() const { return state_->is_open(); }
+
+    [[nodiscard]] virtual int native_handle() {
+        // this function should not be called within a test execution. Otherwise a proper
+        // indirection is missing. Because this function is only required to be called when using
+        // native system calls, something that should be avoided when using fake sockets
+        // TO DO: By now this is needed for tcp acceptor, but later cleanup
+        return -1;
+    }
+
+    virtual void open(boost::asio::ip::tcp::endpoint::protocol_type, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->open();
+    }
+
+    virtual void bind(boost::asio::ip::tcp::endpoint const& _ep, boost::system::error_code& _ec) override {
+        if (!state_->bind(_ep)) {
+            _ec = boost::asio::error::address_in_use;
+            return;
+        }
+        _ec = boost::system::error_code();
+    }
+
+    virtual void close(boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->close();
+    }
+
+    virtual void cancel(boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->cancel();
+    }
+
+    virtual boost::asio::ip::tcp::endpoint local_endpoint(boost::system::error_code& _ec) const override {
+        _ec = boost::system::error_code();
+        return state_->local_endpoint();
+    }
+
+    virtual void io_control(io_control_operation<std::size_t>&, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+    }
+
+    virtual void set_option(boost::asio::ip::tcp::no_delay, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        set_no_delay_ = true;
+    }
+
+    virtual void set_option(boost::asio::ip::tcp::socket::keep_alive, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        set_keep_alive_ = true;
+    }
+
+    virtual void set_option(boost::asio::ip::tcp::socket::linger, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        set_linger_ = true;
+    }
+
+    virtual void set_option(boost::asio::ip::tcp::socket::reuse_address, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        set_reuse_address_ = true;
+    }
+
+#if defined(__linux__)
+    [[nodiscard]] virtual bool set_user_timeout(unsigned int _timeout) {
+        set_user_timeout_ = _timeout;
+        return true;
+    }
+    [[nodiscard]] virtual bool set_keepidle(uint32_t idle) {
+        set_keep_alive_idle_ = idle;
+        return true;
+    }
+    [[nodiscard]] virtual bool set_keepintvl(uint32_t interval) {
+        set_keep_alive_interval_ = interval;
+        return true;
+    }
+    [[nodiscard]] virtual bool set_keepcnt(uint32_t count) {
+        set_keep_alive_count_ = count;
+        return true;
+    }
+    [[nodiscard]] virtual bool set_quick_ack() { return true; }
+#endif
+
+#if defined(__linux__) || defined(__QNX__)
+    [[nodiscard]] virtual bool bind_to_device(std::string const& _device) {
+        bound_device_ = _device;
+        return true;
+    }
+
+    [[nodiscard]] bool can_read_fd_flags() override { return true; }
+#endif
+
+    virtual void async_connect(boost::asio::ip::tcp::endpoint const& _ep, connect_handler handler) override {
+        state_->connect(_ep, std::move(handler));
+    }
+
+    virtual void async_receive(boost::asio::mutable_buffer _buffer, rw_handler _handler) override {
+        state_->async_receive(std::move(_buffer), std::move(_handler));
+    }
+
+    virtual void async_write(std::vector<boost::asio::const_buffer> const& _buffer, rw_handler _handler) override {
+        state_->write(_buffer, std::move(_handler));
+    }
+
+    virtual void async_write(boost::asio::const_buffer const& _buffer, completion_condition _cc, rw_handler _handler) override {
+
+        auto rw_handler = [cc = std::move(_cc), rw = std::move(_handler), state = state_](boost::system::error_code const& ec,
+                                                                                          size_t size) {
+            auto value = cc(ec, size);
+            if (value != 0) {
+                throw std::runtime_error("fake_tcp_socket::async_write: completion condition did not return 0!");
+            }
+            boost::asio::post(state->io_, [rw = std::move(rw), ec, size] { rw(ec, size); });
+        };
+
+        state_->write_boardnet(_buffer, std::move(rw_handler));
+    }
+
+    friend struct fake_tcp_acceptor_handle;
+    friend class fake_tcp_acceptor;
+    std::shared_ptr<fake_tcp_socket_handle> state_;
+    bool set_no_delay_{false};
+    bool set_keep_alive_{false};
+    std::optional<uint32_t> set_keep_alive_idle_;
+    std::optional<uint32_t> set_keep_alive_interval_;
+    std::optional<uint32_t> set_keep_alive_count_;
+    bool set_linger_{false};
+    bool set_reuse_address_{false};
+    std::optional<unsigned int> set_user_timeout_;
+    std::optional<std::string> bound_device_;
+};
+
+/**
+ * Test wrapper around the tcp_acceptor inteface that forwards each call
+ * to the owned fake_tcp_acceptor_handle. Notice that the acceptor itself
+ * might go out of scope while the acceptor_handler might outlive the acceptor,
+ * because the socket_manager has a weak_reference to this handle that might be locked,
+ * while the acceptor might go out of scope. For this reason the acceptor_handle
+ * has no notion of the owning fake_tcp_acceptor class.
+ **/
+class fake_tcp_acceptor : public tcp_acceptor {
+public:
+    explicit fake_tcp_acceptor(std::shared_ptr<fake_tcp_acceptor_handle> _state) : state_(std::move(_state)) { }
+
+    ~fake_tcp_acceptor() = default;
+
+private:
+    [[nodiscard]] virtual bool is_open() const override { return state_->is_open(); }
+    [[nodiscard]] virtual int native_handle() override {
+        // this function should not be called within a test execution. Otherwise a proper
+        // indirection is missing. Because this function is only required to be called when using
+        // native system calls, something that should be avoided when using fake sockets
+        // TO DO: By now this is needed for tcp acceptor, but later cleanup
+        return -1;
+    }
+
+    virtual void open(boost::asio::ip::tcp::endpoint::protocol_type, boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->open();
+    }
+    virtual void bind(boost::asio::ip::tcp::endpoint const& _ep, boost::system::error_code& _ec) override {
+        if (!state_->bind(_ep)) {
+            _ec = boost::asio::error::address_in_use;
+            return;
+        }
+        _ec = boost::system::error_code();
+    }
+
+    virtual void close(boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->close();
+    }
+    virtual void cancel(boost::system::error_code& _ec) override {
+        _ec = boost::system::error_code();
+        state_->cancel();
+    }
+    virtual void set_option(boost::asio::ip::tcp::socket::reuse_address, boost::system::error_code& _ec) override {
+
+        _ec = boost::system::error_code();
+    }
+
+#if defined(__linux__)
+    [[nodiscard]] virtual bool set_reuse_port() override { return true; }
+    [[nodiscard]] virtual bool set_native_option_free_bind() override { return true; }
+#endif
+#if defined(__linux__) || defined(__QNX__)
+    [[nodiscard]] virtual bool bind_to_device(std::string const& _device) override {
+        (void)_device;
+        return true;
+    }
+#endif
+
+    virtual void listen(int, boost::system::error_code& _ec) override { _ec = boost::system::error_code(); }
+
+    // In the fake, the remote_ep_ is already set on the socket by the time the handler fires
+    // (add_connection() runs synchronously before posting the handler), so reading it from
+    // the socket handle is always valid — there is no real-network disconnect race to guard against.
+    virtual void async_accept(tcp_socket& socket, boost::asio::ip::tcp::endpoint& peer_ep, connect_handler handler) override {
+        auto* socket_impl = dynamic_cast<fake_tcp_socket*>(&socket);
+        state_->async_accept(socket, [socket_impl, &peer_ep, h = std::move(handler)](boost::system::error_code ec) mutable {
+            if (!ec && socket_impl) {
+                peer_ep = socket_impl->state_->remote_endpoint();
+            }
+            h(ec);
+        });
+    }
+
+    std::shared_ptr<fake_tcp_acceptor_handle> state_;
+};
+}

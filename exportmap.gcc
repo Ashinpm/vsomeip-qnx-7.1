@@ -1,0 +1,65 @@
+{
+global:
+    extern "C++" {
+        *vsomeip_v3::configuration;
+        vsomeip_v3::configuration::*;
+        *vsomeip_v3::serializer;
+        vsomeip_v3::serializer::*;
+        *vsomeip_v3::deserializer;
+        vsomeip_v3::deserializer::*;
+        *vsomeip_v3::endpoint_definition;
+        vsomeip_v3::endpoint_definition*;
+        *vsomeip_v3::policy;
+        vsomeip_v3::policy::*;
+        *vsomeip_v3::policy_manager;
+        vsomeip_v3::policy_manager::*;
+        vsomeip_v3::security::*;
+        *vsomeip_v3::runtime;
+        vsomeip_v3::runtime::get*;
+        vsomeip_v3::runtime::set_property*;
+        *vsomeip_v3::event;
+        vsomeip_v3::event::*;
+        *vsomeip_v3::eventgroupinfo;
+        vsomeip_v3::eventgroupinfo::*;
+        *vsomeip_v3::remote_subscription;
+        vsomeip_v3::remote_subscription::*;
+        *vsomeip_v3::serviceinfo;
+        vsomeip_v3::serviceinfo::*;
+        *vsomeip_v3::sd::runtime;
+        vsomeip_v3::sd::runtime::*;
+        *vsomeip_v3::plugin_manager;
+        vsomeip_v3::plugin_manager::*;
+        vsomeip_v3::tp::tp_reassembler::*;
+        *vsomeip_v3::logger::message;
+        vsomeip_v3::logger::message::*;
+        vsomeip::runtime::*;
+        *vsomeip::runtime;
+        vsomeip::logger::*;
+        *vsomeip::logger;
+        /* libvsomeip-cfg directly uses logger/policy/utils from libvsomeip */
+        /* TODO: FIXME! */
+        *vsomeip_v3::policy_manager_impl;
+        vsomeip_v3::policy_manager_impl::*;
+        *vsomeip_v3::logger::logger_impl;
+        vsomeip_v3::logger::logger_impl::init*;
+        *vsomeip_v3::utility;
+        vsomeip_v3::utility::is*;
+        /* libvsomeip-sd directly uses message* and tsei/usei impl from libvsomeip */
+        /* TODO: FIXME! */
+        *vsomeip_v3::message_base_impl;
+        *vsomeip_v3::message_base_impl::*;
+        *vsomeip_v3::message_header_impl;
+        *vsomeip_v3::message_header_impl::*;
+        *vsomeip_v3::payload_impl;
+        *vsomeip_v3::payload_impl::*;
+        *vsomeip_v3::tcp_server_endpoint_impl;
+        vsomeip_v3::tcp_server_endpoint_impl::is_established_to*;
+        *vsomeip_v3::udp_server_endpoint_impl;
+        vsomeip_v3::udp_server_endpoint_impl::is_joined*;
+        vsomeip_v3::udp_server_endpoint_impl::join*;
+        vsomeip_v3::udp_server_endpoint_impl::leave*;
+    };
+    vsomeip_plugin_init;
+local:
+    *;
+};

@@ -1,0 +1,30 @@
+#!/bin/bash -x
+# Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Purpose: This script is needed to start the services with
+# one command. This is necessary as ctest - which is used to run the
+# tests - isn't able to start multiple binaries for one testcase. Therefore
+# the testcase simply executes this script. This script then runs the services
+# and checks that all exit successfully.
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+if ! source $SCRIPT_DIRECTORY/../setup_test.sh; then
+    exit 1
+fi
+
+FAIL=0
+
+export VSOMEIP_CONFIGURATION=cpu_load_test_client_master.json
+./cpu_load_test_client --protocol UDP --calls 1000 &
+
+exec_slave "./cpu_load_test_slave_starter.sh"
+
+for job in $(jobs -p)
+do
+    wait $job || FAIL=$(($FAIL+1))
+done
+
+exit $FAIL

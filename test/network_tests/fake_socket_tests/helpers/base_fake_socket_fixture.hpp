@@ -1,0 +1,310 @@
+// Copyright (C) 2014-2026 Bayerische Motoren Werke Aktiengesellschaft (BMW AG)
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#include "sockets/fake_tcp_socket_handle.hpp"
+#include "fake_socket_factory.hpp"
+#include "app.hpp"
+
+#include "socket_manager.hpp"
+
+#include <boost/asio/ip/udp.hpp>
+#include <vsomeip/vsomeip.hpp>
+#include <gtest/gtest.h>
+
+#include <cstdlib>
+
+namespace vsomeip_v3::testing {
+
+/**
+ * Base test fixture to allow the writing of communication based tests.
+ * This class ensures that the test setup follows the basic do "x" wait for "y"
+ * steps in order for the socket_manager to properly identify applications
+ * and inject error into them.
+ *
+ * A basic test setup would be:
+ * 1. instantiate this base class
+ * 2. call base_fake_socket_fixture::use_configuration
+ * 3. instantiate and start as many vsomeip applications as required by calling
+ * create_app() followed by start_client() to gain a handle on a testing::app.
+ *
+ * In addition this base class offers an API to await for low-level socket events
+ * between different application.
+ **/
+struct base_fake_socket_fixture : ::testing::Test {
+    /**
+     * Ensures a fake_socket_factory is injected into any yet to be started
+     * vsomeip::application.
+     */
+    static void SetUpTestSuite();
+
+    /**
+     * Ensures that the injected fake_socket_factory has a "fresh" socket_manager
+     * for every test.
+     */
+    base_fake_socket_fixture();
+    /**
+     * stops every created testing::app and set the socket_manager to a nullptr
+     * into the global fake_socket_factory.
+     */
+    ~base_fake_socket_fixture();
+
+    /**
+     * this function will set the environment variable that will be used
+     * from vsomeip apps to deduce the path to the configuration file.
+     * Because this function is not thread save neither libdlt, nor any app
+     * should be created, before this function is called.
+     */
+    void use_configuration(std::string const& file_name);
+
+    /**
+     * Creates a testing::app. But does not grant access to it yet.
+     */
+    void create_app(std::string const& _name);
+
+    /**
+     * 0. Checks if an app with this name had been created before. Returns nullptr if not.
+     * 1. Registers the name as an identifier with the @socket_manager,
+     * 2. start the testing::app
+     * 3. waits for the socket_manager to be requested to create the first sockets for this
+     * identifier.
+     *
+     * Note: The last step ensures that two app identifiers can be used to uniquely identify socket
+     * connection.
+     */
+    app* start_client(std::string const& _name);
+
+    /**
+     * Returns a pointer to a testing app.
+     */
+    app* get_client(std::string const& _name);
+
+    /**
+     * Stops the client.
+     * Note: the actual memory acquired before will be cleaned-up.
+     **/
+    void stop_client(std::string const _name);
+
+    /**
+     * Waits until _timeout expires or the application identified by _name is awaiting
+     * connections.application identified by _name is awaiting connections. This helper allows to
+     * start the routing application up front, and only start the subsequent applications once the
+     * router can accept the connections.
+     *
+     * @ret true, if the application is awaiting a connection within the passed in timeout,
+     *      false, else.
+     */
+    [[nodiscard]] bool await_connectable(std::string const& _name, std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Waits until @param _multicast group has at least @param _min_count sockets joined, or @param _timeout elapses.
+     */
+    [[nodiscard]] bool await_multicast_join(boost::asio::ip::address const& _multicast, size_t _min_count = 1,
+                                            std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Waits until _timeout expires or the application identified by _client and _server established a
+     * connection. The direction matters. It is awaited that _client connects on an accepting _server.
+     *
+     * @ret true, if the application is awaiting a connection within the passed in timeout,
+     *      false, else.
+     */
+    [[nodiscard]] bool await_connection(std::string const& _client, std::string const& _server,
+                                        std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * Searches for a connection in which _client_name connected to an accepting _server_name.
+     * If the connection is found:
+     * 1. it will try to inject the passed in _client_error into the async_receive handler of the
+     *_client socket.
+     * 2. it will try to inject the passed in _server_error into the async_receive handler form the _server
+     *socket.
+     * 3. it will remove the capability of sending data between the socket. If the socket would be
+     *requested to async_send something the passed in handler would be invoked with a broken pipe
+     *error.
+     *
+     * @param _side_to_disconnect Specifies which of the socket pair disconnects.
+     *                   socket_role::unspecified (default) disconnects both.
+     *
+     * @ret true, if the passed in errors were successfully injected (note two nullopts are always
+     *successfully injected) false, else
+     **/
+    [[nodiscard]] bool disconnect(std::string const& _client_name, std::optional<boost::system::error_code> _client_error,
+                                  std::string const& _server_name, std::optional<boost::system::error_code> _server_error,
+                                  socket_role _side_to_disconnect = socket_role::unspecified);
+
+    /**
+     * @see socket_manager::connection_count()
+     **/
+    size_t connection_count(std::string const& _client, std::string const& _server);
+
+    /**
+     * @see socket_manager::report_on_connect()
+     **/
+    void report_on_connect(std::string const& _app_name, std::vector<boost::system::error_code> _next_errors);
+
+    /**
+     * @see socket_manager::ignore_connections()
+     **/
+    void ignore_connections(std::string const& _app_name, size_t _number_of_ignored_connections);
+
+    /**
+     * @see socket_manager::set_ignore_connections()
+     **/
+    void set_ignore_connections(std::string const& _app_name, bool _ignore_connections);
+
+    /**
+     * @see socket_manager::delay_message_processing()
+     **/
+    [[nodiscard]] bool delay_message_processing(std::string const& _client, std::string const& _server, bool _delay,
+                                                socket_role _role = socket_role::server);
+
+    /**
+     * @see socket_manager::delay_boardnet_sending(boost::asio::ip::udp::endpoint, bool)
+     **/
+    [[nodiscard]] bool delay_boardnet_sending(boost::asio::ip::udp::endpoint const& _ep, bool _delay);
+
+    /**
+     * @see socket_manager::set_ignore_nothing_to_read_from()
+     **/
+    void set_ignore_nothing_to_read_from(std::string const& _client, std::string const& _server, socket_role _role, bool _ignore);
+
+    /**
+     * @see socket_manager::set_ignore_inner_close()
+     **/
+    [[nodiscard]] bool set_ignore_inner_close(std::string const& _client, bool _ignore_in_client, std::string const& _server,
+                                              bool _ignore_in_server);
+
+    /**
+     * @see socket_manager::block_on_close_for()
+     **/
+    [[nodiscard]] bool block_on_close_for(std::string const& _client, std::optional<std::chrono::milliseconds> _client_block_time,
+                                          std::string const& _server, std::optional<std::chrono::milliseconds> _server_block_time);
+
+    /**
+     * @see socket_manager::clear_command_record
+     **/
+    void clear_command_record(std::string const& _client, std::string const& _server);
+
+    [[nodiscard]] bool setup_data_pipe(std::string const& _client, std::string const& _server, socket_role _applied_on,
+                                       std::shared_ptr<data_pipe> const& _pipe);
+
+    /**
+     * @see socket_manager::setup_data_pipe
+     */
+    [[nodiscard]] bool setup_data_pipe(boost::asio::ip::udp::endpoint const& _ep, std::string const& _app_name, socket_role _applied_on,
+                                       std::shared_ptr<data_pipe> const& _pipe);
+
+    /**
+     * @see socket_manager::wait_for_command
+     **/
+    [[nodiscard]] bool wait_for_command(std::string const& _client, std::string const& _server, protocol::id_e _id, socket_role _waiting,
+                                        std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * @see socket_manager::wait_for_last_command
+     **/
+    [[nodiscard]] bool wait_for_last_command(std::string const& _client, std::string const& _server, socket_role _waiting,
+                                             protocol::id_e _id, std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    /**
+     * @see socket_manager::wait_for_connection_drop
+     **/
+    [[nodiscard]] bool wait_for_connection_drop(std::string const& _client, std::string const& _server,
+                                                std::chrono::milliseconds _timeout = std::chrono::seconds(3));
+
+    void fail_on_bind(std::string const& _app, bool _fail);
+
+    /**
+     * @see socket_manager::fail_on_uds_bind
+     */
+    void fail_on_uds_bind(std::string const& _app, bool _fail);
+
+    /**
+     * @see socket_manager::set_ignore_broken_pipe
+     */
+    void set_ignore_broken_pipe(std::string const& _app_name, bool _set);
+
+    /**
+     * @see socket_manager::drop_command_once
+     */
+    std::future<protocol::id_e> drop_command_once(std::string const& _from, std::string const& _to, protocol::id_e _id);
+
+    /**
+     * @see socket_manager::inject_command_tcp
+     */
+    bool inject_command_tcp(std::string const& _client, std::string const& _server, std::vector<unsigned char>& _payload);
+
+    /**
+     * @see socket_manager::inject_message_tcp
+     */
+    bool inject_message_tcp(std::string const& _client, std::string const& _server, std::vector<unsigned char>& _payload);
+
+    /**
+     * @see socket_manager::inject_message_udp
+     */
+    bool inject_message_udp(boost::asio::ip::udp::endpoint _src, boost::asio::ip::udp::endpoint _dst, std::vector<unsigned char>& _payload);
+
+    /**
+     * @see socket_manager::inject_message_udp_multicast
+     */
+    bool inject_message_udp_multicast(boost::asio::ip::udp::endpoint _src, boost::asio::ip::udp::endpoint _dst,
+                                      std::vector<unsigned char>& _payload);
+
+    /**
+     * @see socket_manager::set_custom_command_handler
+     */
+    void set_custom_command_handler(std::string const& _client, std::string const& _server, vsomeip_command_handler const& _handler,
+                                    socket_role _sender = socket_role::unspecified);
+
+    /*
+     * Inserts an error code in the receive operation of the given `endpoint`.
+     *
+     * Returns true if successful.
+     */
+    [[nodiscard]] bool insert_udp_recv_error(const boost::asio::ip::udp::endpoint& _endpoint, boost::system::error_code _ec);
+
+    /*
+     * Inserts an error code in the send operation of the given `endpoint`.
+     *
+     * Returns true if successful.
+     */
+    [[nodiscard]] bool insert_udp_send_error(const boost::asio::ip::udp::endpoint& _endpoint, boost::system::error_code _ec);
+
+    /**
+     * @see socket_manager::get_connection_socket_type
+     * Returns the socket type used by the connection between _client and _server.
+     */
+    [[nodiscard]] std::optional<socket_type> get_connection_socket_type(std::string const& _client, std::string const& _server);
+
+    /**
+     * @see socket_manager::ignore_router_all_multicast_joins
+     */
+    void ignore_router_all_multicast_joins(std::string _router, bool _ignore);
+
+    /**
+     * @see socket_manager::wait_for_sd_message
+     */
+    [[nodiscard]] bool wait_for_sd_message(boost::asio::ip::udp::endpoint const& _ep, someip_sd_record_message _message,
+                                           std::chrono::milliseconds _timeout = std::chrono::seconds(3)) const;
+
+    /**
+     * @see socket_manager::clear_sd_message_record
+     **/
+    void clear_sd_message_record(boost::asio::ip::udp::endpoint const& _ep);
+
+    /**
+     * @see socket_manager::send_someip
+     */
+    void send_someip_sd_message(std::vector<unsigned char> const& _buffer, boost::asio::ip::udp::endpoint const& _src,
+                                boost::asio::ip::udp::endpoint const& _dst);
+
+protected:
+    std::shared_ptr<socket_manager> socket_manager_{std::make_shared<socket_manager>()};
+
+private:
+    static std::shared_ptr<fake_socket_factory> factory_;
+    std::map<std::string, std::unique_ptr<app>> name_to_client_;
+};
+}
