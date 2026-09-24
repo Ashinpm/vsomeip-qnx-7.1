@@ -31,13 +31,13 @@ The stack consists out of:
 
 - vSomeIP uses CMake as buildsystem.
 - vSomeIP uses Boost >= 1.75.0:
-- vSomeIP 3.7.4
+- vSomeIP 3.7.4 
 
 ###### Code changes
-- stripped c++20 features like spaceship operator etc.. to work with Q++ compiler
-- tested on Raspberry Pi 4B
-- works only on io-pkt network stack
-- guide to run this on raspberry pi will be uploaded soon
+- Stripped c++20 features like spaceship operator etc.. to work with QNX compiler
+- Tested on Raspberry Pi 4B and linux pc
+- Works only on io-pkt network stack
+
 
 ###### Compilation Steps
 
@@ -54,6 +54,7 @@ cd boost_1_75_0
 echo "using qcc : qnx : q++ -Vgcc_ntoaarch64le ;" > user-config.jam
 ```
 
+Source QNX env File
 
 ```
 source qnx710/qnxsdp-env.sh
@@ -62,13 +63,17 @@ source qnx710/qnxsdp-env.sh
 ```
 ./bootstrap.sh
 ```
+specify the boost installation directory
 
 ```
 ./b2 toolset=qcc-qnx target-os=qnxnto link=shared threading=multi   --with-system --with-thread --with-filesystem --with-log   --user-config=user-config.jam   --prefix=../boost_qnx_install install
 
 ```
+After sucessful compilation of boost for qnx, clone and compile vsomeip for qnx
+
 ```
 cd ..
+
 ```
 ```
 git clone https://github.com/Ashinpm/vsomeip-qnx-7.1.git
@@ -81,6 +86,7 @@ cd vsomeip-qnx-7.1/build_qnx/
 cd vsomeip/build_qnx
 
 ```
+Turn off DLT to avoid compilation error. DLT can be cross compiled to work with the build
 
 ```
 cmake ..   -DCMAKE_TOOLCHAIN_FILE=qnx.nto.toolchain.cmake   -DCMAKE_SYSTEM_PROCESSOR=aarch64   -DBOOST_ROOT=../../boost_qnx_install   -DDISABLE_DLT=ON
